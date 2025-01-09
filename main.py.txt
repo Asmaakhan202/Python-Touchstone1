@@ -1,0 +1,101 @@
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+import base64
+import re
+
+# Constants
+GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+SHEETS_SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+EMAIL_QUERY = "subject:'New Patient'"  # Adjust this query as needed
+SPREADSHEET_ID = "1lfQL28PA0syGjbGlWeEOzAGFNpcieqKkfPlPseY653I"
+SHEET_NAME = "Sheet1"
+
+# Load credentials
+GMAIL_CREDENTIALS_FILE = 'client_secret_1079023342562-hs2iol4iv8kdfqp6g26dbepfdmvgv5a1.apps.googleusercontent.com.json';  # Replace with actual path
+SHEETS_CREDENTIALS_FILE = 'client_secret_1079023342562-hs2iol4iv8kdfqp6g26dbepfdmvgv5a1.apps.googleusercontent.com.json'  # Replace with actual path
+
+def authenticate_gmail():
+    creds = Credentials.from_service_account_file(GMAIL_CREDENTIALS_FILE, scopes=GMAIL_SCOPES)
+    service = build('gmail', 'v1', credentials=creds)
+    return service
+
+def authenticate_sheets():
+    creds = Credentials.from_service_account_file(SHEETS_CREDENTIALS_FILE, scopes=SHEETS_SCOPES)
+    service = build('sheets', 'v4', credentials=creds)
+    return service
+
+def fetch_emails(service):
+    results = service.users().messages().list(userId='me', q=EMAIL_QUERY).execute()
+    messages = results.get('messages', [])
+    return messages
+
+def parse_email(service, message_id):
+    message = service.users().messages().get(userId='me', id=message_id, format='full').execute()
+    payload = message['payload']
+    headers = payload['headers']
+    body = payload['body']
+
+    email_data = {
+        'subject': next(header['value'] for header in headers if header['name'] == 'Subject'),
+        'from': next(header['value'] for header in headers if header['name'] == 'From'),
+        'date': next(header['value'] for header in headers if header['name'] == 'Date'),
+    }
+
+    if 'data' in body:
+        decoded_body = base64.urlsafe_b64decode(body['data']).decode('utf-8')
+        email_data.update(parse_email_body(decoded_body))
+
+    return email_data
+
+def parse_email_body(body):
+    data = {}
+    match_name = re.search(r"Name:\s*(.*?)\n", body)
+    match_dob = re.search(r"DOB:\s*(.*?)\n", body)
+    match_email = re.search(r"Email:\s*(.*?)\n", body)
+
+    if match_name:
+        data['name'] = match_name.group(1)
+    if match_dob:
+        data['dob'] = match_dob.group(1)
+    if match_email:
+        data['email'] = match_email.group(1)
+
+    return data
+
+def update_spreadsheet(service, data):
+    sheet = service.spreadsheets()
+    rows = [list(data.values())]
+
+    body = {
+        'values': rows
+    }
+
+    result = sheet.values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{SHEET_NAME}!A1",
+        valueInputOption="USER_ENTERED",
+        body=body
+    ).execute()
+
+    print(f"{result.get('updates').get('updatedCells')} cells updated.")
+
+# Main Function
+def main():
+    gmail_service = authenticate_gmail()
+    sheets_service = authenticate_sheets()
+
+    messages = fetch_emails(gmail_service)
+
+    if not messages:
+        print("No matching emails found.")
+        return
+
+    for message in messages:
+        email_data = parse_email(gmail_service, message['id'])
+        if 'name' in email_data and 'dob' in email_data and 'email' in email_data:
+            update_spreadsheet(sheets_service, email_data)
+        else:
+            print(f"Email {message['id']} skipped due to incomplete data.")
+
+if __name__ == "__main__":
+    main()
